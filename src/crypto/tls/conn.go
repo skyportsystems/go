@@ -47,6 +47,9 @@ type Conn struct {
 	// firstFinished contains the first Finished hash sent during the
 	// handshake. This is the "tls-unique" channel binding value.
 	firstFinished [12]byte
+	// v2ClientHello contains the CH as sent by the client if it's been
+	// unwrapped from a SSLv2 compatibility handshake
+	v2ClientHello []byte
 
 	clientProtocol         string
 	clientProtocolFallback bool
@@ -529,6 +532,103 @@ func (c *Conn) newRecordHeaderError(msg string) (err RecordHeaderError) {
 	return err
 }
 
+func unwrapSSLv2Handshake(c *Conn, b *block) error {
+	// The high bit must be 1 for a SSLv2 compatible ClientHello
+	if b.data[0]&128 != 128 {
+		c.sendAlert(alertUnexpectedMessage)
+		return c.in.setErrorLocked(errors.New("tls: v2 handshake unwrapping error"))
+	}
+
+	recordLength := uint16(b.data[0]&0x7f)<<8 | uint16(b.data[1])
+	mType := uint8(b.data[2])
+	majVer := uint8(b.data[3])
+	minVer := uint8(b.data[4])
+
+	if mType != typeClientHello {
+		c.sendAlert(alertUnexpectedMessage)
+		return c.in.setErrorLocked(errors.New("tls: v2 handshake unwrapping error"))
+	}
+
+	// We can only unwrap SSLv2 ClientHello if TLS/SSLv3 is supported
+	if majVer < 3 {
+		c.sendAlert(alertProtocolVersion)
+		return c.in.setErrorLocked(errors.New("tls: unsupported version in v2 handshake"))
+	}
+
+	if err := b.readFromUntil(c.conn, int(2+recordLength)); err != nil {
+		if err == io.EOF {
+			err = io.ErrUnexpectedEOF
+		}
+		if e, ok := err.(net.Error); !ok || !e.Temporary() {
+			c.in.setErrorLocked(err)
+		}
+		return err
+	}
+
+	cipherSpecLen := uint16(b.data[5])<<8 | uint16(b.data[6])
+	if (cipherSpecLen % 3) != 0 {
+		c.sendAlert(alertHandshakeFailure)
+		return c.in.setErrorLocked(errors.New("tls: v2 handshake unwrapping error"))
+	}
+
+	// Session ID length MUST be zero for a SSLv2 ClientHello
+	sessionIdLen := uint16(b.data[7])<<8 | uint16(b.data[8])
+	if sessionIdLen != 0 {
+		c.sendAlert(alertHandshakeFailure)
+		return c.in.setErrorLocked(errors.New("tls: v2 handshake unwrapping error"))
+	}
+
+	challengeLen := uint16(b.data[9])<<8 | uint16(b.data[10])
+	// The spec is contradictory here -- it says challengeLen must be 32, but
+	// also specifies how to handle challenge lengths greater or less than that
+	// Anyway according to rfc2246 must have at least 16 bytes of challenge data
+	// See also "Netscape SSLv2 challenge length bug" in
+	// http://www.dcs.ed.ac.uk/home/crypto/SSLeay/vendor-bugs.html
+	if challengeLen < 16 {
+		c.sendAlert(alertHandshakeFailure)
+		return c.in.setErrorLocked(errors.New("tls: v2 handshake unwrapping error"))
+	}
+
+	if recordLength != 9+cipherSpecLen+challengeLen {
+		c.sendAlert(alertHandshakeFailure)
+		return c.in.setErrorLocked(errors.New("tls: v2 handshake unwrapping error"))
+	}
+
+	cipherSpecs := b.data[11 : 11+cipherSpecLen]
+	challengeData := b.data[11+cipherSpecLen : 11+cipherSpecLen+challengeLen]
+
+	b, c.rawInput = c.in.splitBlock(b, int(2+recordLength))
+
+	// Create a normal ClientHello message and write it to the handshake buffer
+	helloMsg := clientHelloMsg{}
+	helloMsg.vers = uint16(majVer)<<8 | uint16(minVer)
+	helloMsg.sessionId = []byte{0} // Session ID must be zero
+	helloMsg.compressionMethods = []uint8{compressionNone}
+	// Only use the last 32 bytes of the challenge data, padded to the right
+	if len(challengeData) < 32 {
+		helloMsg.random = make([]byte, 32-len(challengeData))
+		helloMsg.random = append(helloMsg.random, challengeData...)
+	} else {
+		helloMsg.random = challengeData[len(challengeData)-32:]
+	}
+
+	for i := 0; i < len(cipherSpecs); i += 3 {
+		if cipherSpecs[i] != 0 {
+			continue
+		}
+		cipher := uint16(cipherSpecs[i+1])<<8 | uint16(cipherSpecs[i+2])
+		helloMsg.cipherSuites = append(helloMsg.cipherSuites, cipher)
+	}
+
+	c.hand.Write(helloMsg.marshal())
+
+	c.v2ClientHello = make([]byte, recordLength)
+	copy(c.v2ClientHello, b.data[2:])
+	c.in.freeBlock(b)
+
+	return nil
+}
+
 // readRecord reads the next TLS record from the connection
 // and updates the record layer state.
 // c.in.Mutex <= L; c.input == nil.
@@ -578,8 +678,7 @@ Again:
 	// is always < 256 bytes long. Therefore typ == 0x80 strongly suggests
 	// an SSLv2 client.
 	if want == recordTypeHandshake && typ == 0x80 {
-		c.sendAlert(alertProtocolVersion)
-		return c.in.setErrorLocked(c.newRecordHeaderError("unsupported SSLv2 handshake received"))
+		return unwrapSSLv2Handshake(c, b)
 	}
 
 	vers := uint16(b.data[1])<<8 | uint16(b.data[2])
