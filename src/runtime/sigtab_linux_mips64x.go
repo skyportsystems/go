@@ -46,7 +46,7 @@ var sigtable = [...]sigTabT{
 	/* 30 */ {_SigNotify, "SIGXCPU: cpu limit exceeded"},
 	/* 31 */ {_SigNotify, "SIGXFSZ: file size limit exceeded"},
 	/* 32 */ {_SigSetStack + _SigUnblock, "signal 32"}, /* SIGCANCEL; see issue 6997 */
-	/* 33 */ {_SigSetStack + _SigUnblock, "signal 33"}, /* SIGSETXID; see issues 3871, 9400, 12498 */
+	/* 33 */ {_SigNotify, "signal 33"}, /* hack around apparent qemu-mips64el bug */
 	/* 34 */ {_SigNotify, "signal 34"},
 	/* 35 */ {_SigNotify, "signal 35"},
 	/* 36 */ {_SigNotify, "signal 36"},
