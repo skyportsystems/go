@@ -129,17 +129,12 @@ func archreloc(r *ld.Reloc, s *ld.LSym, val *int64) int {
 
 			return 0
 
-		case obj.R_ADDRMIPSTLS:
-			r.Done = 0
-			r.Xsym = r.Sym
-			r.Xadd = r.Add
-			return 0
-
-		case obj.R_CALLMIPS,
+		case obj.R_ADDRMIPSTLS,
+			obj.R_CALLMIPS,
 			obj.R_JMPMIPS:
 			r.Done = 0
 			r.Xsym = r.Sym
-			r.Xadd = r.Add >> 2
+			r.Xadd = r.Add
 			return 0
 		}
 	}
