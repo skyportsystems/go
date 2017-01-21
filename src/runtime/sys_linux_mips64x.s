@@ -254,6 +254,9 @@ TEXT runtime·sigtramp(SB),NOSPLIT,$64
 	JAL	(R1)
 	RET
 
+TEXT runtime·cgoSigtramp(SB),NOSPLIT,$0
+	JMP	runtime·sigtramp(SB)
+
 TEXT runtime·mmap(SB),NOSPLIT,$-8
 	MOVV	addr+0(FP), R4
 	MOVV	n+8(FP), R5
